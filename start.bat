@@ -1,0 +1,13 @@
+@echo off
+echo Starting the Chatbot Application...
+
+echo Starting the backend server...
+start cmd /k python server.py
+
+echo Starting the frontend server...
+cd frontend
+start cmd /k npm start
+
+echo Both servers are starting. Please wait a moment...
+echo Backend: http://localhost:5000
+echo Frontend: http://localhost:3000 
