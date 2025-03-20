@@ -1,17 +1,27 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
 import { 
   FaMicrophone, FaMicrophoneSlash, FaPaperPlane, 
   FaPlus, FaFile, FaImage, FaTrash, FaShare,
   FaBars, FaTimes
 } from 'react-icons/fa';
+import { processMemoryOperation, updateMemory, formatMemoryResponse } from '../utils/memoryManager';
 import './Chat.css';
 
 function Chat() {
-  const [conversations, setConversations] = useState([
-    { id: 'default', title: 'New Chat', messages: [] }
-  ]);
-  const [activeConversation, setActiveConversation] = useState('default');
+  // Initialize conversations from localStorage or with default value
+  const [conversations, setConversations] = useState(() => {
+    const savedConversations = localStorage.getItem('chatConversations');
+    return savedConversations ? JSON.parse(savedConversations) : [
+      { id: 'default', title: 'New Chat', messages: [] }
+    ];
+  });
+  
+  const [activeConversation, setActiveConversation] = useState(() => {
+    const savedActive = localStorage.getItem('activeConversation');
+    return savedActive || 'default';
+  });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -45,7 +55,9 @@ function Chat() {
   // Handle window resize for responsive sidebar
   useEffect(() => {
     const handleResize = () => {
-      setShowSidebar(window.innerWidth > 768);
+      if (window.innerWidth > 768) {
+        setShowSidebar(true);
+      }
     };
     
     window.addEventListener('resize', handleResize);
@@ -57,34 +69,71 @@ function Chat() {
     scrollToBottom();
   }, [conversations]);
   
+  // Save conversations and active conversation to localStorage
+  useEffect(() => {
+    localStorage.setItem('chatConversations', JSON.stringify(conversations));
+  }, [conversations]);
+
+  useEffect(() => {
+    localStorage.setItem('activeConversation', activeConversation);
+  }, [activeConversation]);
+  
+  // Add memory state for the current conversation
+  const [conversationMemory, setConversationMemory] = useState(() => {
+    const savedMemory = localStorage.getItem('conversationMemory');
+    return savedMemory ? JSON.parse(savedMemory) : {};
+  });
+
+  // Save memory to localStorage
+  useEffect(() => {
+    localStorage.setItem('conversationMemory', JSON.stringify(conversationMemory));
+  }, [conversationMemory]);
+  
+  const [pendingFiles, setPendingFiles] = useState([]);
+  
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
   
-  // Save conversations to localStorage
-  useEffect(() => {
-    const savedConversations = localStorage.getItem('chatConversations');
-    if (savedConversations) {
-      setConversations(JSON.parse(savedConversations));
-    }
-  }, []);
-  
-  useEffect(() => {
-    localStorage.setItem('chatConversations', JSON.stringify(conversations));
-  }, [conversations]);
-  
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() && pendingFiles.length === 0) return;
 
-    // Add user message to current conversation
-    const userMessage = { text: input, sender: 'user', timestamp: new Date().toISOString() };
+    // Create the message content
+    let messageText = input.trim();
+    
+    // If there are files attached, include file info in message text
+    if (pendingFiles.length > 0) {
+      const fileNames = pendingFiles.map(f => f.name).join(', ');
+      if (messageText) {
+        // Combine user text with file info
+        messageText = `${messageText}\n\n(Files attached: ${fileNames})`;
+      } else {
+        // If no text input, just mention the files
+        messageText = `Files attached: ${fileNames}`;
+      }
+    }
+    
+    // Create user message with text and any file info
+    const userMessage = { 
+      text: messageText, 
+      sender: 'user', 
+      timestamp: new Date().toISOString(),
+      // Include file info if any files are attached
+      ...(pendingFiles.length > 0 && {
+        fileInfo: pendingFiles.map(f => ({
+          name: f.name,
+          type: f.type,
+          size: f.size
+        }))
+      })
+    };
     
     // Update the conversations state
     const updatedConversations = conversations.map(conv => {
       if (conv.id === activeConversation) {
         // Update conversation title if it's the first message
-        const title = conv.messages.length === 0 ? input.slice(0, 30) : conv.title;
+        const title = conv.messages.length === 0 ? messageText.slice(0, 30) : conv.title;
         return {
           ...conv,
           title: title,
@@ -96,12 +145,62 @@ function Chat() {
     
     setConversations(updatedConversations);
     setInput('');
+    setPendingFiles([]); // Clear pending files after sending
     setIsLoading(true);
 
     try {
-      // Send request to backend
+      // Process memory operation if present
+      const currentMemoryForChat = conversationMemory[activeConversation] || {};
+      console.log("Current memory:", currentMemoryForChat);
+      
+      const memoryOperation = processMemoryOperation(input, currentMemoryForChat);
+      console.log("Memory operation result:", memoryOperation);
+      
+      let memoryResponse = null;
+
+      if (memoryOperation) {
+        // Update memory state
+        const updatedMemory = updateMemory(memoryOperation, currentMemoryForChat);
+        console.log("Updated memory:", updatedMemory);
+        
+        setConversationMemory(prev => ({
+          ...prev,
+          [activeConversation]: updatedMemory
+        }));
+        
+        memoryResponse = formatMemoryResponse(memoryOperation, currentMemoryForChat);
+        console.log("Memory response:", memoryResponse);
+        
+        // Add bot response for memory operation
+        const botMessage = { 
+          text: memoryResponse, 
+          sender: 'bot', 
+          timestamp: new Date().toISOString() 
+        };
+        
+        setConversations(prevConversations => 
+          prevConversations.map(conv => {
+            if (conv.id === activeConversation) {
+              return {
+                ...conv,
+                messages: [...conv.messages, botMessage]
+              };
+            }
+            return conv;
+          })
+        );
+        
+        setIsLoading(false);
+        return;
+      }
+
+      // If not a memory operation, send request to backend
       const response = await axios.post('http://localhost:5000/chat', {
-        prompt: input
+        prompt: input,
+        memory: currentMemoryForChat,
+        conversationId: activeConversation,
+        // In a real application, you would also upload the actual files here
+        files: pendingFiles.length > 0 ? pendingFiles.map(f => f.name) : []
       });
       
       // Add bot response to current conversation
@@ -151,11 +250,17 @@ function Chat() {
   
   const handleNewChat = () => {
     const newId = `chat-${Date.now()}`;
-    setConversations([
-      ...conversations,
+    setConversations(prev => [
+      ...prev,
       { id: newId, title: 'New Chat', messages: [] }
     ]);
     setActiveConversation(newId);
+    
+    // Initialize empty memory for new chat
+    setConversationMemory(prev => ({
+      ...prev,
+      [newId]: {}
+    }));
     
     // On mobile, close the sidebar after creating a new chat
     if (window.innerWidth <= 768) {
@@ -164,16 +269,25 @@ function Chat() {
   };
   
   const handleDeleteChat = (id) => {
-    const updatedConversations = conversations.filter(conv => conv.id !== id);
-    setConversations(updatedConversations);
-    
-    // If we deleted the active conversation, set a new active one
-    if (id === activeConversation && updatedConversations.length > 0) {
-      setActiveConversation(updatedConversations[0].id);
-    } else if (updatedConversations.length === 0) {
-      // If no conversations left, create a new one
-      handleNewChat();
-    }
+    setConversations(prev => {
+      const updated = prev.filter(conv => conv.id !== id);
+      // If we deleted the active conversation, set a new active one
+      if (id === activeConversation && updated.length > 0) {
+        setActiveConversation(updated[0].id);
+      } else if (updated.length === 0) {
+        // If no conversations left, create a new one
+        const newId = `chat-${Date.now()}`;
+        setActiveConversation(newId);
+        return [{ id: newId, title: 'New Chat', messages: [] }];
+      }
+      return updated;
+    });
+
+    // Clean up memory for deleted chat
+    setConversationMemory(prev => {
+      const { [id]: deleted, ...rest } = prev;
+      return rest;
+    });
   };
   
   const toggleVoiceInput = () => {
@@ -192,55 +306,27 @@ function Chat() {
   };
   
   const handleFileUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
     
-    // Create a message with file info
-    const fileMessage = { 
-      text: `Attached file: ${file.name}`, 
-      sender: 'user',
-      timestamp: new Date().toISOString(),
-      fileInfo: {
+    // Add files to pending files
+    setPendingFiles(prev => [
+      ...prev,
+      ...files.map(file => ({
+        file,
+        id: `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         name: file.name,
         type: file.type,
         size: file.size
-      }
-    };
+      }))
+    ]);
     
-    // Add file message to current conversation
-    setConversations(prevConversations => 
-      prevConversations.map(conv => {
-        if (conv.id === activeConversation) {
-          return {
-            ...conv,
-            messages: [...conv.messages, fileMessage]
-          };
-        }
-        return conv;
-      })
-    );
-    
-    // In a real app, you would upload the file to your server here
-    // For now, we'll just add a mock response
-    setTimeout(() => {
-      const botResponse = { 
-        text: `I've received your file: ${file.name}. What would you like me to do with it?`, 
-        sender: 'bot',
-        timestamp: new Date().toISOString()
-      };
-      
-      setConversations(prevConversations => 
-        prevConversations.map(conv => {
-          if (conv.id === activeConversation) {
-            return {
-              ...conv,
-              messages: [...conv.messages, botResponse]
-            };
-          }
-          return conv;
-        })
-      );
-    }, 1000);
+    // Reset file input
+    e.target.value = null;
+  };
+  
+  const removeFile = (fileId) => {
+    setPendingFiles(prev => prev.filter(file => file.id !== fileId));
   };
   
   const handleShareConversation = () => {
@@ -272,27 +358,11 @@ function Chat() {
 
   return (
     <div className="chat-app">
-      {/* Mobile sidebar toggle button */}
-      <button 
-        className="mobile-sidebar-toggle" 
-        onClick={toggleSidebar}
-        aria-label="Toggle sidebar"
-      >
-        {showSidebar ? <FaTimes /> : <FaBars />}
-      </button>
-      
       {/* Sidebar */}
-      <div className={`sidebar ${showSidebar ? 'open' : 'closed'}`}>
+      <div className={`sidebar ${!showSidebar ? 'closed' : ''}`}>
         <div className="sidebar-header">
           <button className="new-chat-btn" onClick={handleNewChat}>
             <FaPlus /> New Chat
-          </button>
-          <button 
-            className="toggle-sidebar-btn" 
-            onClick={toggleSidebar}
-            aria-label="Toggle sidebar"
-          >
-            {showSidebar ? '←' : '→'}
           </button>
         </div>
         <div className="conversations-list">
@@ -324,6 +394,15 @@ function Chat() {
         </div>
       </div>
       
+      {/* Menu toggle button */}
+      <button 
+        className="sidebar-toggle-btn" 
+        onClick={toggleSidebar}
+        aria-label="Toggle sidebar"
+      >
+        {showSidebar ? <FaTimes /> : <FaBars />}
+      </button>
+      
       {/* Main Chat Area */}
       <div className="chat-container">
         <div className="chat-header">
@@ -348,17 +427,44 @@ function Chat() {
               <div key={index} className={`message ${message.sender} ${message.isError ? 'error' : ''}`}>
                 <div className="message-bubble">
                   {message.fileInfo ? (
-                    <div className="file-attachment">
-                      <div className="file-icon">
-                        {message.fileInfo.type.includes('image') ? <FaImage /> : <FaFile />}
-                      </div>
-                      <div className="file-info">
-                        <div className="file-name">{message.fileInfo.name}</div>
-                        <div className="file-size">{(message.fileInfo.size / 1024).toFixed(2)} KB</div>
-                      </div>
+                    <div className="file-attachments">
+                      {Array.isArray(message.fileInfo) ? (
+                        // Multiple files
+                        <>
+                          <ReactMarkdown>{message.text}</ReactMarkdown>
+                          <div className="files-count">{message.fileInfo.length} file{message.fileInfo.length > 1 ? 's' : ''} attached</div>
+                          <div className="files-list">
+                            {message.fileInfo.map((file, idx) => (
+                              <div key={idx} className="file-attachment">
+                                <div className="file-icon">
+                                  {file.type.includes('image') ? <FaImage /> : <FaFile />}
+                                </div>
+                                <div className="file-info">
+                                  <div className="file-name">{file.name}</div>
+                                  <div className="file-size">{(file.size / 1024).toFixed(2)} KB</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        // Single file (legacy support)
+                        <>
+                          <ReactMarkdown>{message.text}</ReactMarkdown>
+                          <div className="file-attachment">
+                            <div className="file-icon">
+                              {message.fileInfo.type.includes('image') ? <FaImage /> : <FaFile />}
+                            </div>
+                            <div className="file-info">
+                              <div className="file-name">{message.fileInfo.name}</div>
+                              <div className="file-size">{(message.fileInfo.size / 1024).toFixed(2)} KB</div>
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                   ) : (
-                    message.text
+                    <ReactMarkdown>{message.text}</ReactMarkdown>
                   )}
                 </div>
                 <div className="message-timestamp">
@@ -367,7 +473,7 @@ function Chat() {
               </div>
             ))
           )}
-          {isLoading && (
+          {isLoading && activeConversation === currentConversation.id && (
             <div className="message bot">
               <div className="message-bubble loading">
                 <div className="dot-typing"></div>
@@ -376,6 +482,35 @@ function Chat() {
           )}
           <div ref={messagesEndRef} />
         </div>
+        
+        {/* File Preview Area - now shown above the input form */}
+        {pendingFiles.length > 0 && (
+          <div className="file-preview-area">
+            <div className="file-preview-header">
+              <h3>Attached Files ({pendingFiles.length})</h3>
+            </div>
+            <div className="file-preview-list">
+              {pendingFiles.map(file => (
+                <div key={file.id} className="file-preview-item">
+                  <div className="file-preview-icon">
+                    {file.type.includes('image') ? <FaImage /> : <FaFile />}
+                  </div>
+                  <div className="file-preview-info">
+                    <div className="file-preview-name">{file.name}</div>
+                    <div className="file-preview-size">{(file.size / 1024).toFixed(2)} KB</div>
+                  </div>
+                  <button 
+                    className="remove-file-btn"
+                    onClick={() => removeFile(file.id)}
+                    aria-label="Remove file"
+                  >
+                    <FaTrash />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         
         <form className="input-form" onSubmit={handleSubmit}>
           <div className="input-actions">
@@ -392,6 +527,7 @@ function Chat() {
               ref={fileInputRef} 
               style={{ display: 'none' }} 
               onChange={handleFileUpload}
+              multiple
               aria-label="File input"
             />
             <button 
@@ -407,14 +543,14 @@ function Chat() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message here..."
+            placeholder={pendingFiles.length > 0 ? "Add a message with your files..." : "Type your message here..."}
             disabled={isLoading}
             aria-label="Message input"
           />
           <button 
             type="submit" 
             className="send-btn"
-            disabled={isLoading || !input.trim()}
+            disabled={isLoading || (!input.trim() && pendingFiles.length === 0)}
             aria-label="Send message"
           >
             <FaPaperPlane />
